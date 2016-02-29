@@ -14,6 +14,7 @@ use std::collections::btree_map::Entry::*;
 use std::mem;
 use std::sync::{Arc};
 use std::any::Any;
+use std::rc::Rc;
 
 use self::log_var::LogVar;
 use self::log_var::LogVar::*;
@@ -33,6 +34,8 @@ pub struct Transaction {
     ///
     /// the logs need to be accessed in a order to prevend dead-locks on locking
     vars: BTreeMap<Arc<VarControlBlock>, LogVar>,
+
+    deferred: Vec<Rc<Fn() -> ()>>,
 }
 
 impl Transaction {
@@ -41,7 +44,16 @@ impl Transaction {
     /// normally you don't need to call this directly because the log
     /// is created as a thread-local global variable
     fn new() -> Transaction {
-        Transaction { vars: BTreeMap::new() }
+        Transaction { 
+            vars: BTreeMap::new(),
+            deferred: Vec::new(),
+        }
+    }
+
+    pub fn deferred<F>(&mut self, f: F)
+        where F: Fn() -> ()+'static
+    {
+        self.deferred.push(Rc::new(f) as Rc<Fn() -> ()>);
     }
 
     /// Run a function with a transaction.
@@ -148,7 +160,8 @@ impl Transaction {
 
         // Create a backup of the log.
         let mut copy = Transaction {
-            vars: self.vars.clone()
+            vars: self.vars.clone(),
+            deferred: self.deferred.clone(),
         };
 
         // Run the first computation.
@@ -311,6 +324,10 @@ impl Transaction {
             var.wake_all();
         }
 
+        for d in self.deferred.drain(..) {
+            d();
+        }
+
         // commit succeded
         true
     }
@@ -324,7 +341,6 @@ fn arc_to_address<T: ?Sized>(arc: &Arc<T>) -> usize {
 fn same_address<T: ?Sized>(a: &Arc<T>, b: &Arc<T>) -> bool {
     arc_to_address(a) == arc_to_address(b)
 }
-
 
 /// Test same_address on a cloned Arc
 #[test]
